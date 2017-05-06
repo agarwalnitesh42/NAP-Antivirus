@@ -1,0 +1,178 @@
+create or replace
+PACKAGE LOGIN 
+IS
+ 
+  PROCEDURE create_users
+    (batch_id    used_prefix.batchid%TYPE,
+     login_prefix     used_prefix.prefix%TYPE,
+     total_count        NUMBER, 
+     tablespace_name VARCHAR2 DEFAULT 'exam');
+  
+    PROCEDURE lock_login
+    (login  VARCHAR2,
+     status VARCHAR2 DEFAULT 'LOCK');
+  
+END LOGIN;
+--------------------------------------------------------------------------------
+
+
+
+create or replace
+PACKAGE BODY LOGIN 
+IS
+  FUNCTION get_dbname RETURN VARCHAR2 
+  IS
+  BEGIN
+    RETURN (sys_context('USERENV','DB_NAME'));
+  END;
+  
+  PROCEDURE create_login
+    (login    EXAM_USER_INFO.user_name%TYPE,
+     passwd  EXAM_USER_INFO.pwd%TYPE,
+     tablespace_name VARCHAR2)
+  IS
+    v_sql     VARCHAR2(4000);
+  BEGIN       
+        v_sql := 'CREATE USER ' || login || ' IDENTIFIED BY '|| passwd || ' default tablespace ' || tablespace_name;    
+        EXECUTE IMMEDIATE v_sql;
+        v_sql := 'GRANT  CONNECT, RESOURCE, CREATE TABLE, CREATE VIEW, CREATE MATERIALIZED VIEW, CREATE SYNONYM, DEBUG CONNECT SESSION, DEBUG ANY PROCEDURE TO ' || login;
+        EXECUTE IMMEDIATE v_sql;
+  END create_login;
+  
+  PROCEDURE create_users
+    (batch_id    used_prefix.batchid%TYPE,
+     login_prefix     used_prefix.prefix%TYPE,
+     total_count        NUMBER, 
+     tablespace_name VARCHAR2)
+  IS
+    v_user    EXAM_USER_INFO.user_name%TYPE := login_prefix;
+    v_passwd  EXAM_USER_INFO.pwd%TYPE := 'practice';
+    v_sql     VARCHAR2(500);
+  BEGIN
+      INSERT INTO used_prefix(prefix, batchid) VALUES(UPPER(login_prefix), UPPER(batch_id));
+      FOR I in 1 .. total_count
+      LOOP
+        if total_count > 1 then
+          v_user := upper(to_char(login_prefix || '_' || I));        
+        end if;
+        if upper(tablespace_name) = 'EXAM' THEN
+          v_passwd:=DBMS_RANDOM.STRING('L', 10);
+          INSERT INTO EXAM_USER_INFO(user_name, pwd, created_on, folder, prefix) VALUES (v_user, v_passwd, SYSDATE, NULL, UPPER(login_prefix));
+        END IF;      
+        create_login (v_user, v_passwd, tablespace_name);
+      END LOOP;
+  END create_users;
+
+
+  PROCEDURE kill_running_session
+  (user_name VARCHAR2) 
+  IS
+    TYPE session_list IS  TABLE OF VARCHAR2(100) INDEX BY PLS_INTEGER;
+    kill_session session_list;
+  BEGIN
+    SELECT 'ALTER SYSTEM KILL SESSION ''' || SID || ',' || serial# ||'''  IMMEDIATE'  BULK COLLECT INTO kill_session  FROM v$session WHERE username=UPPER(user_name);
+    FOR session_cnt IN NVL(kill_session.FIRST,1) .. NVL(kill_session.LAST,0)
+    LOOP
+      DBMS_OUTPUT.PUT_LINE(kill_session(session_cnt));
+      EXECUTE IMMEDIATE kill_session(session_cnt);
+    END LOOP;
+  END;
+
+  PROCEDURE lock_login
+    (login  VARCHAR2,
+     status VARCHAR2 DEFAULT 'LOCK')
+  IS
+    v_sql     VARCHAR2(500);
+  BEGIN
+    v_sql := 'ALTER USER ' || login || ' ACCOUNT ' || status;
+    IF upper(status)='LOCK' THEN
+      kill_running_session(login);
+    END IF;
+    EXECUTE IMMEDIATE v_sql;
+    DBMS_OUTPUT.PUT_LINE(login || ' ' || status || 'ed Successfully...');
+  END lock_login;
+
+  FUNCTION allow_prefix (login_prefix  used_prefix.prefix%TYPE)
+  RETURN BOOLEAN IS
+    v_prefix  used_prefix.prefix%TYPE;
+  BEGIN
+    SELECT prefix INTO v_prefix FROM used_prefix WHERE UPPER(prefix)=UPPER(login_prefix);
+    RETURN FALSE; -- IF ALREADY USED, DO NOT ALLOW
+  EXCEPTION
+    WHEN NO_DATA_FOUND THEN
+      RETURN TRUE;
+  END;
+  
+  PROCEDURE lock_exam_login 
+    (login_prefix  used_prefix.prefix%TYPE,
+      status VARCHAR2 DEFAULT 'lock')
+  IS
+    CURSOR cur_login IS
+    SELECT user_name FROM exam_user_info WHERE UPPER(prefix)=UPPER(login_prefix);
+    v_cnt     NUMBER;
+    e_prefixnotUsed EXCEPTION;
+  
+  BEGIN
+    IF allow_prefix(login_prefix) THEN
+      RAISE e_prefixnotUsed;
+    END IF;
+  
+    FOR v_rec IN cur_login
+    LOOP
+      lock_login (v_rec.user_name, status);
+      v_cnt:=cur_login%ROWCOUNT;
+    END LOOP;
+  DBMS_OUTPUT.PUT_LINE('Total Accounts '|| status || 'ed : ' || v_cnt);
+  
+  EXCEPTION
+    WHEN e_prefixnotUsed THEN
+      DBMS_OUTPUT.PUT_LINE('WRONG prefix...');
+      RAISE_APPLICATION_ERROR(-20001, 'WRONG prefix...');
+    WHEN OTHERS THEN
+      DBMS_OUTPUT.PUT_LINE(SQLERRM);
+  END  lock_exam_login;
+  
+  PROCEDURE practice_login
+    (login_name  VARCHAR2,
+     passwd VARCHAR2 DEFAULT 'practice',
+     tablespace_name VARCHAR2 DEFAULT 'practice',
+     total_count NUMBER DEFAULT 1) IS
+  BEGIN
+  
+    DBMS_OUTPUT.PUT_LINE('Below are login details');
+    DBMS_OUTPUT.PUT_LINE('');
+      
+    IF total_count <> 1 THEN
+      FOR i IN 1 .. total_count
+      LOOP
+        create_login(to_char(login_name||'_'||i), passwd, tablespace_name);
+        DBMS_OUTPUT.PUT_LINE('Login: '|| to_char(login_name||'_'||i));
+      END LOOP;
+    ELSE
+      create_login(login_name, passwd, tablespace_name);
+      DBMS_OUTPUT.PUT_LINE('Login: '|| login_name);
+    END IF;
+    DBMS_OUTPUT.PUT_LINE('Password: ' || passwd);
+    DBMS_OUTPUT.PUT_LINE('HostString: ' || get_dbname );
+    DBMS_OUTPUT.PUT_LINE('');
+  END practice_login;
+
+  PROCEDURE lock_practice_login
+    (login_name  VARCHAR2,
+      total_count NUMBER DEFAULT 1,
+     status VARCHAR2 DEFAULT 'LOCK')
+  IS
+  BEGIN
+    IF total_count <> 1 THEN
+      FOR i IN 1 .. total_count
+      LOOP
+        lock_login (to_char(login_name||'_'||i), status);
+      END LOOP;
+    ELSE
+        lock_login (login_name, status);
+    END IF;
+  END lock_practice_login;
+
+END LOGIN;
+
+SELECT username FROM DBA_users WHERE username like 'T99%'
